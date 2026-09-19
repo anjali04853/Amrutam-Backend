@@ -1,0 +1,312 @@
+openapi: 3.0.3
+info:
+  title: Amrutam Telemedicine API
+  version: 1.0.0
+  description: |
+    Backend API for Amrutam's telemedicine platform: auth, doctor
+    availability/booking, consultations, prescriptions, payments,
+    search, and admin analytics.
+servers:
+  - url: http://localhost:3000/api/v1
+    description: Local development
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            message: { type: string }
+            code: { type: string }
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        role: { type: string, enum: [PATIENT, DOCTOR, ADMIN] }
+    Consultation:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        patientId: { type: string, format: uuid }
+        doctorId: { type: string, format: uuid }
+        slotId: { type: string, format: uuid }
+        status: { type: string, enum: [SCHEDULED, IN_PROGRESS, COMPLETED, CANCELLED, NO_SHOW] }
+        scheduledAt: { type: string, format: date-time }
+paths:
+  /auth/register:
+    post:
+      summary: Register a new user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, name, role]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 10 }
+                name: { type: string }
+                role: { type: string, enum: [PATIENT, DOCTOR] }
+      responses:
+        "201":
+          description: User registered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+                  accessToken: { type: string }
+                  refreshToken: { type: string }
+        "409":
+          description: Email already registered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /auth/login:
+    post:
+      summary: Log in, optionally with MFA code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+                totpCode: { type: string, minLength: 6, maxLength: 6 }
+      responses:
+        "200":
+          description: Logged in, or mfaRequired flag if MFA code needed
+        "401":
+          description: Invalid credentials
+  /auth/mfa/enroll:
+    post:
+      summary: Enroll in TOTP MFA
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: TOTP secret and otpauth URL for QR generation
+  /auth/mfa/confirm:
+    post:
+      summary: Confirm MFA enrollment with a TOTP code
+      security: [{ bearerAuth: [] }]
+      responses:
+        "204":
+          description: MFA enabled
+  /auth/refresh:
+    post:
+      summary: Rotate a refresh token for a new access token
+      responses:
+        "200":
+          description: New token pair
+  /auth/logout:
+    post:
+      summary: Revoke a refresh token
+      responses:
+        "204":
+          description: Logged out
+  /doctors/me/profile:
+    post:
+      summary: Create the authenticated doctor's profile
+      security: [{ bearerAuth: [] }]
+      responses:
+        "201":
+          description: Doctor profile created
+        "403":
+          description: Caller is not a doctor
+  /doctors/me/availability:
+    post:
+      summary: Bulk-add availability slots for the authenticated doctor
+      security: [{ bearerAuth: [] }]
+      responses:
+        "201":
+          description: Slots created
+        "409":
+          description: A submitted slot overlaps an existing slot
+  /doctors/{doctorId}/availability:
+    get:
+      summary: List a doctor's open availability slots in a date range
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: doctorId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: Open slots
+  /bookings:
+    post:
+      summary: Book an availability slot (idempotent)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [doctorId, slotId]
+              properties:
+                doctorId: { type: string, format: uuid }
+                slotId: { type: string, format: uuid }
+      responses:
+        "201":
+          description: Booking created (or replayed via idempotency key)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Consultation" }
+        "409":
+          description: Slot is no longer available
+  /consultations/{id}/status:
+    patch:
+      summary: Transition a consultation's status (enforced state machine)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [IN_PROGRESS, COMPLETED, CANCELLED, NO_SHOW] }
+      responses:
+        "200":
+          description: Updated consultation
+        "400":
+          description: Illegal state transition
+        "403":
+          description: Caller is neither the patient nor the doctor on this consultation
+  /prescriptions/consultations/{consultationId}:
+    post:
+      summary: Issue a prescription for a completed consultation
+      security: [{ bearerAuth: [] }]
+      responses:
+        "201":
+          description: Prescription created; PDF generation and notification enqueued
+        "400":
+          description: Consultation is not COMPLETED
+        "403":
+          description: Caller is not the doctor assigned to this consultation
+  /payments:
+    post:
+      summary: Charge for a consultation (idempotent, mocked gateway)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [consultationId]
+              properties:
+                consultationId: { type: string, format: uuid }
+                forceOutcome:
+                  type: string
+                  enum: [success, fail, timeout]
+                  description: >-
+                    Demo/testing only — forces the mock gateway outcome. Ignored
+                    (stripped server-side) when NODE_ENV=production; never reaches
+                    the gateway logic in a production deployment.
+      responses:
+        "201":
+          description: Payment succeeded (or replayed via idempotency key)
+        "402":
+          description: Payment declined or timed out by the gateway
+        "403":
+          description: Caller is not the patient on this consultation
+        "409":
+          description: A payment already exists for this consultation
+      description: >-
+        The amount charged is always the assigned doctor's consultationFee,
+        looked up server-side from the consultation's doctor. The client cannot
+        supply or influence the charged amount.
+  /search/doctors:
+    get:
+      summary: Search and filter doctors
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string }
+        - name: specialty
+          in: query
+          schema: { type: string }
+        - name: maxFee
+          in: query
+          schema: { type: number }
+      responses:
+        "200":
+          description: Matching doctors, cached for 30s
+  /admin/analytics:
+    get:
+      summary: Read pre-aggregated daily analytics (admin only)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: Daily summary rows
+        "403":
+          description: Caller is not an admin
+  /admin/audit-logs:
+    get:
+      summary: Query audit log entries (admin only)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: resourceType
+          in: query
+          schema: { type: string }
+        - name: resourceId
+          in: query
+          schema: { type: string }
+        - name: actorId
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+      responses:
+        "200":
+          description: Matching audit log entries

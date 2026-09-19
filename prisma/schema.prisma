@@ -1,0 +1,201 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  PATIENT
+  DOCTOR
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum SlotStatus {
+  OPEN
+  HELD
+  BOOKED
+}
+
+enum ConsultationStatus {
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+model User {
+  id           String     @id @default(uuid())
+  email        String     @unique
+  passwordHash String
+  mfaSecret    String?
+  mfaEnabled   Boolean    @default(false)
+  role         Role
+  status       UserStatus @default(ACTIVE)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  profile          Profile?
+  doctor           Doctor?
+  refreshTokens    RefreshToken[]
+  patientBookings  Consultation[] @relation("PatientConsultations")
+  auditLogs        AuditLog[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  revoked   Boolean  @default(false)
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model Profile {
+  userId      String   @id
+  name        String
+  phoneEnc    String?
+  dateOfBirth DateTime?
+  addressEnc  String?
+  avatarUrl   String?
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("profiles")
+}
+
+model Doctor {
+  userId             String   @id
+  specialty          String
+  licenseNumberEnc   String
+  bio                String?
+  consultationFee    Decimal  @db.Decimal(10, 2)
+  ratingAvg          Decimal  @default(0) @db.Decimal(3, 2)
+  yearsExperience    Int      @default(0)
+  searchVector       Unsupported("tsvector")?
+
+  user             User               @relation(fields: [userId], references: [id])
+  availabilitySlots AvailabilitySlot[]
+  consultations    Consultation[]
+  prescriptions    Prescription[]
+
+  @@map("doctors")
+}
+
+model AvailabilitySlot {
+  id        String     @id @default(uuid())
+  doctorId  String
+  startTime DateTime
+  endTime   DateTime
+  status    SlotStatus @default(OPEN)
+  version   Int        @default(0)
+
+  doctor       Doctor        @relation(fields: [doctorId], references: [userId])
+  consultation Consultation?
+
+  @@index([doctorId, startTime])
+  @@map("availability_slots")
+}
+
+model Consultation {
+  id             String             @id @default(uuid())
+  patientId      String
+  doctorId       String
+  slotId         String             @unique
+  status         ConsultationStatus @default(SCHEDULED)
+  scheduledAt    DateTime
+  idempotencyKey String             @unique
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  patient      User             @relation("PatientConsultations", fields: [patientId], references: [id])
+  doctor       Doctor           @relation(fields: [doctorId], references: [userId])
+  slot         AvailabilitySlot @relation(fields: [slotId], references: [id])
+  prescription Prescription?
+  payment      Payment?
+
+  @@index([patientId])
+  @@index([doctorId])
+  @@map("consultations")
+}
+
+model Prescription {
+  id             String   @id @default(uuid())
+  consultationId String   @unique
+  doctorId       String
+  content        Json
+  pdfUrl         String?
+  issuedAt       DateTime @default(now())
+
+  consultation Consultation @relation(fields: [consultationId], references: [id])
+  doctor       Doctor       @relation(fields: [doctorId], references: [userId])
+
+  @@map("prescriptions")
+}
+
+model Payment {
+  id             String        @id @default(uuid())
+  consultationId String        @unique
+  amount         Decimal       @db.Decimal(10, 2)
+  currency       String        @default("INR")
+  status         PaymentStatus @default(PENDING)
+  providerRef    String?
+  idempotencyKey String        @unique
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  consultation Consultation @relation(fields: [consultationId], references: [id])
+
+  @@map("payments")
+}
+
+model AuditLog {
+  id           String   @id @default(uuid())
+  actorId      String?
+  action       String
+  resourceType String
+  resourceId   String
+  before       Json?
+  after        Json?
+  ipAddress    String?
+  createdAt    DateTime @default(now())
+
+  actor User? @relation(fields: [actorId], references: [id])
+
+  @@index([resourceType, resourceId])
+  @@index([actorId])
+  @@map("audit_logs")
+}
+
+model AnalyticsDailySummary {
+  date               DateTime @id @db.Date
+  totalConsultations Int      @default(0)
+  totalRevenue       Decimal  @default(0) @db.Decimal(12, 2)
+  cancelledCount     Int      @default(0)
+  noShowCount        Int      @default(0)
+  computedAt         DateTime @default(now())
+
+  @@map("analytics_daily_summary")
+}
